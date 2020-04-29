@@ -1,0 +1,5 @@
+targets:
+  $default:
+    builders:
+      happypass_builder|happypass_builder:
+        enabled: true
