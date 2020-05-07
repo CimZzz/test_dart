@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:stream_data_reader/stream_data_reader.dart';
 import 'package:transport/transport.dart' show ServerTransaction;
 
+import 'h264nalu.dart';
+
 /// 关于 SDP 文件的解析
 /// v 会话级描述
 /// m 媒体级描述
@@ -44,10 +46,21 @@ a=control:track0
 
 final replaceReg = RegExp('(\\r)?(\\n)?');
 
+const SERVER_RTP_PORT  = 55532;
+const SERVER_RTCP_PORT = 55533;
+
+RawDatagramSocket rtpServer;
+RawDatagramSocket rtcpServer;
+
+void init() async {
+	rtpServer = await RawDatagramSocket.bind('0.0.0.0', SERVER_RTP_PORT);
+	rtcpServer = await RawDatagramSocket.bind('0.0.0.0', SERVER_RTCP_PORT);
+}
+
 /// RTSP Server 端指令流
 Stream<RTSPServerRecv> rtspStream(Stream<List<int>> rawDataStream) async* {
 	final reader = DataReader(ByteBufferReader(StreamReader(rawDataStream)));
-	while(!reader.isEnd()) {
+	while(!reader.isEnd) {
 		// RTSP Method Header
 		var strLine = await reader.readString();
 		strLine = strLine.replaceAll(replaceReg, '');
@@ -99,6 +112,9 @@ Stream<RTSPServerRecv> rtspStream(Stream<List<int>> rawDataStream) async* {
 
 }
 
+String a;
+InternetAddress b;
+
 class RTSPServerRecv {
 	RTSPServerRecv({this.method, this.url, this.version, this.cseq, this.headers});
 
@@ -123,6 +139,8 @@ class RTSPServerRecv {
 class RTSPTransaction extends ServerTransaction {
 	@override
 	void handleSocket(Socket socket) {
+		print('recv: ${socket.remoteAddress}, port: ${socket.remotePort}');
+
 		rtspStream(socket).listen((event) {
 			print(event);
 			print('');
@@ -151,8 +169,10 @@ class RTSPTransaction extends ServerTransaction {
 					final clientPort = transport.substring(flag + 1, endIdx);
 					socket.write('RTSP/1.0 200 OK\r\n');
 					socket.write('CSeq: ${event.cseq}\r\n');
-					socket.write('Transport: RTP/AVP;unicast;client_port=$clientPort;server_port=60000-60001\r\n');
+					socket.write('Transport: RTP/AVP;unicast;client_port=$transport;server_port=$SERVER_RTP_PORT-$SERVER_RTCP_PORT\r\n');
 					socket.write('Session: 66334873\r\n\r\n');
+					a = clientPort;
+					b = socket.remoteAddress;
 					break;
 				case 'PLAY':
 					socket.write('RTSP/1.0 200 OK\r\n');
@@ -160,6 +180,7 @@ class RTSPTransaction extends ServerTransaction {
 					socket.write('Range: npt=0.000-\r\n');
 					socket.write('Session: 66334873\r\n\r\n');
 					// 开始播放，通过 udp 发送 H264 数据流
+					transportData();
 					break;
 			}
 		}, onError: (e, stackTrace) {
@@ -167,5 +188,120 @@ class RTSPTransaction extends ServerTransaction {
 			print('done');
 			socket.destroy();
 		});
+	}
+}
+
+final header = RTPHeader();
+
+Future<void> transportData() async {
+	header.version = 2;
+	header.padding = 0;
+	header.extension = 0;
+	header.csrcLen = 0;
+	header.market = 0;
+	header.payloadType = 96;
+	header.seq = 0;
+	header.timestamp = 0;
+	header.ssrc = 0x88923423;
+	final port = int.tryParse(a.split('-')[0]);
+	print('address: $b, port: $port');
+	final socket = await RawDatagramSocket.bind('127.0.0.1', 12290);
+	final file = File('/Users/wangyanxiong/Downloads/test.h264');
+	final reader = StreamReader(h264NALUStream(file.openRead()));
+	while(!reader.isEnd) {
+		final nalu = await reader.read();
+		await sendNalu(socket, nalu, port);
+		header.timestamp += 90000~/25;
+//		await Future.delayed(Duration(milliseconds: 1000~/25));
+	}
+}
+
+var fi = true;
+void sendNalu(RawDatagramSocket socket, H264NALU h264nalu, int port) async {
+//	print('send');
+	final length = h264nalu.dataList.length;
+	var naluType = h264nalu.dataList[0];
+	if(length <= Max_PKG_Size) {
+		// single
+		final list = header.toList();
+		list.addAll(h264nalu.dataList);
+		socket.send(list, b, port);
+		header.seq ++;
+	}
+	else {
+		// multi
+		var pkgNumber = length ~/ Max_PKG_Size;
+		pkgNumber += length % Max_PKG_Size == 0 ? 0 : 1;
+		var beginPosition = 1;
+		for(var i = 0 ; i < pkgNumber ; i ++) {
+			final list = header.toList();
+			list.add((naluType & 0x60) | 28);
+			if(i == 0) {
+				list.add((naluType & 0x1F) | 0x80);
+				list.addAll(h264nalu.dataList.sublist(beginPosition, Max_PKG_Size));
+			}
+			else if(i == pkgNumber - 1) {
+				list.add((naluType & 0x1F) | 0x40);
+				list.addAll(h264nalu.dataList.sublist(beginPosition));
+			}
+			else {
+				list.add(naluType & 0x1F);
+				list.addAll(h264nalu.dataList.sublist(beginPosition, Max_PKG_Size));
+			}
+
+			socket.send(list, b, port);
+			header.seq ++;
+		}
+	}
+}
+
+const Max_PKG_Size = 1400;
+
+const FPS = 25;
+
+typedef Writer = void Function(List<int> bytes);
+
+class RTPHeader {
+	/* byte 0 */
+	/// 2 bit
+	int version;
+	/// 1 bit
+	int padding;
+	/// 1 bit
+	int extension;
+	/// 4 bit
+	int csrcLen;
+
+	/* byte 1 */
+	/// 1 bit
+	int market;
+	/// 7 bit
+	int payloadType;
+
+	/* byte 2, 3(2) */
+	int seq;
+
+	/* byte 4 - 7(4) */
+	int timestamp;
+
+	/* byte 8 - 11(4) */
+	int ssrc;
+
+	List<int> toList() {
+		final bytes = <int>[];
+		bytes.add(((version & 0x3) << 6) | ((padding & 0x1) << 5) | ((extension & 0x1) << 4) | (csrcLen & 0xF));
+		bytes.add(((market & 0x1) << 7) | (payloadType & 0x7F));
+//		bytes.add(((market & 0x1)) | ((payloadType & 0x7F) << 1));
+		bytes.add((seq >> 8) & 0xFF);
+		bytes.add(seq & 0xFF);
+		bytes.add((timestamp >> 24) & 0xFF);
+		bytes.add((timestamp >> 16) & 0xFF);
+		bytes.add((timestamp >> 8) & 0xFF);
+		bytes.add(timestamp & 0xFF);
+		bytes.add((ssrc >> 24) & 0xFF);
+		bytes.add((ssrc >> 16) & 0xFF);
+		bytes.add((ssrc >> 8) & 0xFF);
+		bytes.add(ssrc & 0xFF);
+		return bytes;
 	}
 }
