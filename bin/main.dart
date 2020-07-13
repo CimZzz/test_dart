@@ -1,33 +1,24 @@
 
 
+
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
-import 'dart:typed_data';
 
-import 'package:pedantic/pedantic.dart';
-import 'package:transport/transport.dart';
-
-import 'h264nalu.dart';
-import 'rtsp.dart';
-
-
-
+import 'package:stream_data_reader/stream_data_reader.dart';
 
 void main() async {
-	a = '9832';
-	b = InternetAddress('127.0.0.1');
-	await transportData();
-//	TransportServer(
-//		localPort: 9999,
-//		transaction: RTSPTransaction()
-//	).startServer();
-//	final socket = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 12290);
-//	final file = File('/Users/wangyanxiong/Downloads/test.h264');
-//	final reader = StreamReader(h264NALUStream(file.openRead()));
-//	while(!reader.isEnd) {
-//		await reader.read();
-//	}
-//	print((await reader.read()).dataList);
-//	print((await reader.read()).dataList);
+	final socket = await Socket.connect('192.168.31.195', 10087);
+	final message = utf8.encode(json.encode({
+		'eventType': 0,
+		'eventParams': {
+			'accountId': 'abc'
+		}
+	}));
+	socket.add([message.length & 0xFF]);
+	socket.add(message);
+	await socket.flush();
+	final reader = DataReader(ByteBufferReader(StreamReader(socket)));
+	final size = await reader.readOneByte();
+	final buffer = await reader.readBytes(length: size);
+	print(utf8.decode(buffer));
 }

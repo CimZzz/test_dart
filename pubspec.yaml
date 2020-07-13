@@ -7,9 +7,8 @@ environment:
   sdk: '>=2.2.0 <3.0.0'
 
 dependencies:
-  stream_data_reader:
-    path: /Users/wangyanxiong/Documents/IDEAProject/stream_reader
-  transport:
+  uuid: ^1.0.0
+  stream_data_reader: ^1.0.5
 
 dev_dependencies:
   pedantic: ^1.8.0
